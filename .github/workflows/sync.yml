@@ -1,41 +1,57 @@
-name: Sync OKX C2C Rate
+name: Sync OKX Rate & Monitor Wallets
 
 on:
   schedule:
-    - cron: '*/10 * * * *'
+    - cron: '*/5 * * * *' # 每5分钟自动运行一次
   workflow_dispatch:
 
 jobs:
-  sync:
+  sync_and_watch:
     runs-on: ubuntu-latest
     steps:
-      - name: Fetch OKX C2C and Push to Worker
+      - name: Sync OKX C2C Rate and Check TRC20 Wallets
         run: |
           python3 - << 'EOF'
           import urllib.request
           import json
+          from datetime import datetime, timezone, timedelta
+
+          TG_TOKEN = "9233305756:AAHBKxnbaR0mNbPIq_jS59l-YhaLYW4lEfI"
+          SYNC_KEY = "okx888"
+          WORKER_BASE = "https://red-frog-a187.a3636065." + "workers.dev"
+          USDT_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
 
           headers = {
               "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
-              "Accept": "application/json",
-              "Referer": "https://www." + "://okx.com"
+              "Accept": "application/json"
           }
 
-          def fetch_json(url):
-              req = urllib.request.Request(url, headers=headers)
+          def fetch_json(url, extra_headers=None):
+              h = dict(headers)
+              if extra_headers:
+                  h.update(extra_headers)
+              req = urllib.request.Request(url, headers=h)
               with urllib.request.urlopen(req, timeout=15) as res:
                   return json.loads(res.read().decode("utf-8"))
 
+          def send_tg(chat_id, text):
+              tg_url = "https://api." + "telegram.org/bot" + TG_TOKEN + "/sendMessage"
+              data = json.dumps({"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}).encode("utf-8")
+              req = urllib.request.Request(tg_url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+              with urllib.request.urlopen(req, timeout=15) as res:
+                  res.read()
+
+          # ================= 1. 同步欧易 C2C 汇率 =================
           buy_price = ""
           sell_price = ""
+          okx_ref = {"Referer": "https://www." + "://okx.com"}
 
-          hosts = ["www." + "okx.com", "aws." + "okx.com"]
-          for host in hosts:
+          for host in ["www." + "okx.com", "aws." + "okx.com"]:
               try:
                   b_url = f"https://{host}/v3/c2c/tradingOrders/books?quoteCurrency=CNY&baseCurrency=USDT&side=sell&paymentMethod=all&userType=all&showTrade=false&showFollow=false&showAlreadyTraded=false&isAbleFilter=false"
                   s_url = f"https://{host}/v3/c2c/tradingOrders/books?quoteCurrency=CNY&baseCurrency=USDT&side=buy&paymentMethod=all&userType=all&showTrade=false&showFollow=false&showAlreadyTraded=false&isAbleFilter=false"
-                  b_data = fetch_json(b_url)
-                  s_data = fetch_json(s_url)
+                  b_data = fetch_json(b_url, okx_ref)
+                  s_data = fetch_json(s_url, okx_ref)
                   b_list = b_data.get("data", {}).get("sell", [])
                   s_list = s_data.get("data", {}).get("buy", [])
                   if b_list:
@@ -48,24 +64,110 @@ jobs:
               except Exception as e:
                   print(f"{host} C2C failed: {e}")
 
-          if not buy_price:
-              try:
-                  api_url = "https://www." + "://okx.com"
-                  rate_data = fetch_json(api_url)
-                  usd_cny = rate_data.get("data", [{}]).pop(0).get("usdCny", "")
-                  if usd_cny:
-                      buy_price = str(usd_cny)
-                      sell_price = str(usd_cny)
-                      print(f"OKX API v5 -> Rate: {buy_price}")
-              except Exception as e:
-                  print(f"OKX API v5 failed: {e}")
+          if buy_price:
+              sync_url = f"{WORKER_BASE}/sync-okx?key={SYNC_KEY}&buy={buy_price}&sell={sell_price}"
+              with urllib.request.urlopen(urllib.request.Request(sync_url, headers=headers), timeout=15) as r:
+                  print("Sync OKX:", r.read().decode("utf-8"))
 
-          if not buy_price:
-              raise RuntimeError("Failed to fetch rate from all OKX endpoints")
+          # ================= 2. 扫描监听钱包的 TRC20-USDT 动账 =================
+          try:
+              wallets = fetch_json(f"{WORKER_BASE}/wallets?key={SYNC_KEY}")
+              print(f"Loaded {len(wallets)} watched wallets.")
+              updated = False
 
-          worker_host = "red-frog-a187.a3636065." + "workers.dev"
-          sync_url = f"https://{worker_host}/sync-okx?key=okx888&buy={buy_price}&sell={sell_price}"
-          req_sync = urllib.request.Request(sync_url, headers={"User-Agent": "GitHub-Actions-Sync"})
-          with urllib.request.urlopen(req_sync, timeout=15) as sync_res:
-              print("Worker Response:", sync_res.read().decode("utf-8"))
+              for w in wallets:
+                  addr = w.get("address", "")
+                  remark = w.get("remark", "默认钱包")
+                  chat_id = w.get("chatId")
+                  last_tx = w.get("lastTxId", "")
+
+                  if not addr or not chat_id:
+                      continue
+
+                  tron_url = f"https://api." + f"trongrid.io/v1/accounts/{addr}/transactions/trc20?limit=5&contract_address={USDT_CONTRACT}"
+                  tx_resp = fetch_json(tron_url)
+                  tx_list = tx_resp.get("data", [])
+
+                  if not tx_list:
+                      continue
+
+                  newest_tx_id = tx_list.pop(0).get("transaction_id", "")
+
+                  # 重新拉取完整列表以便按顺序处理未通知的新交易
+                  tx_list = fetch_json(tron_url).get("data", [])
+
+                  # 首次添加钱包：仅记录当前最新一笔交易哈希作为起点，不推送历史旧账
+                  if not last_tx:
+                      w["lastTxId"] = newest_tx_id
+                      updated = True
+                      print(f"Initialized anchor tx for {addr}: {newest_tx_id}")
+                      continue
+
+                  # 收集所有比 last_tx 更新的交易
+                  new_txs = []
+                  for tx in tx_list:
+                      if tx.get("transaction_id") == last_tx:
+                          break
+                      new_txs.append(tx)
+
+                  if new_txs:
+                      # 按时间从旧到新逐笔发送通知
+                      new_txs.reverse()
+                      for tx in new_txs:
+                          tx_id = tx.get("transaction_id", "")
+                          from_addr = tx.get("from", "")
+                          to_addr = tx.get("to", "")
+                          raw_val = float(tx.get("value", "0")) / 1_000_000.0
+                          ts_ms = tx.get("block_timestamp", 0)
+                          dt_bj = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+
+                          is_in = (to_addr == addr)
+                          direction = "🟢 收到 USDT（转入）" if is_in else "🔴 支出 USDT（转出）"
+                          sign = "+" if is_in else "-"
+                          peer = from_addr if is_in else to_addr
+
+                          # 查询最新 USDT 余额
+                          bal_str = "查询中"
+                          try:
+                              acc_url = f"https://api." + f"trongrid.io/v1/accounts/{addr}"
+                              acc_data = fetch_json(acc_url).get("data", [])
+                              if acc_data:
+                                  trc20_list = acc_data.pop(0).get("trc20", [])
+                                  for token_obj in trc20_list:
+                                      if USDT_CONTRACT in token_obj:
+                                          bal_val = float(token_obj.get(USDT_CONTRACT, "0")) / 1_000_000.0
+                                          bal_str = f"{bal_val:,.2f} USDT"
+                                          break
+                          except Exception:
+                              pass
+
+                          msg = (
+                              f"🔔 *TRC20 钱包动账提醒*\n\n"
+                              f"🏷 钱包备注：{remark}\n"
+                              f"👛 监听地址：`{addr}`\n"
+                              f"📌 交易类型：{direction}\n"
+                              f"💰 变动金额：*{sign}{raw_val:,.2f} USDT*\n"
+                              f"🏦 当前余额：{bal_str}\n"
+                              f"👤 对方地址：`{peer}`\n"
+                              f"🕒 交易时间：{dt_bj}\n"
+                              f"🔗 [查看交易详情](https://tronscan.org{tx_id})"
+                          )
+                          send_tg(chat_id, msg)
+                          print(f"Sent alert for {addr}: {sign}{raw_val} USDT")
+
+                      w["lastTxId"] = newest_tx_id
+                      updated = True
+
+              if updated:
+                  post_req = urllib.request.Request(
+                      f"{WORKER_BASE}/wallets?key={SYNC_KEY}",
+                      data=json.dumps(wallets).encode("utf-8"),
+                      headers={"Content-Type": "application/json"},
+                      method="POST"
+                  )
+                  with urllib.request.urlopen(post_req, timeout=15) as r:
+                      print("Updated wallet state:", r.read().decode("utf-8"))
+
+          except Exception as e:
+              print("Wallet monitor error:", e)
           EOF
