@@ -18,7 +18,7 @@ jobs:
           headers = {
               "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
               "Accept": "application/json",
-              "Referer": "https://okx.com"
+              "Referer": "https://www." + "://okx.com"
           }
 
           def fetch_json(url):
@@ -29,10 +29,11 @@ jobs:
           buy_price = ""
           sell_price = ""
 
-          for domain in ["://okx.com", "://okx.com"]:
+          hosts = ["www." + "okx.com", "aws." + "okx.com"]
+          for host in hosts:
               try:
-                  b_url = f"https://{domain}/v3/c2c/tradingOrders/books?quoteCurrency=CNY&baseCurrency=USDT&side=sell&paymentMethod=all&userType=all&showTrade=false&showFollow=false&showAlreadyTraded=false&isAbleFilter=false"
-                  s_url = f"https://{domain}/v3/c2c/tradingOrders/books?quoteCurrency=CNY&baseCurrency=USDT&side=buy&paymentMethod=all&userType=all&showTrade=false&showFollow=false&showAlreadyTraded=false&isAbleFilter=false"
+                  b_url = f"https://{host}/v3/c2c/tradingOrders/books?quoteCurrency=CNY&baseCurrency=USDT&side=sell&paymentMethod=all&userType=all&showTrade=false&showFollow=false&showAlreadyTraded=false&isAbleFilter=false"
+                  s_url = f"https://{host}/v3/c2c/tradingOrders/books?quoteCurrency=CNY&baseCurrency=USDT&side=buy&paymentMethod=all&userType=all&showTrade=false&showFollow=false&showAlreadyTraded=false&isAbleFilter=false"
                   b_data = fetch_json(b_url)
                   s_data = fetch_json(s_url)
                   b_list = b_data.get("data", {}).get("sell", [])
@@ -42,14 +43,15 @@ jobs:
                   if s_list:
                       sell_price = s_list.pop(min(2, len(s_list) - 1)).get("price", "")
                   if buy_price:
-                      print(f"OKX C2C ({domain}) -> Buy: {buy_price}, Sell: {sell_price}")
+                      print(f"OKX C2C ({host}) -> Buy: {buy_price}, Sell: {sell_price}")
                       break
               except Exception as e:
-                  print(f"{domain} C2C failed: {e}")
+                  print(f"{host} C2C failed: {e}")
 
           if not buy_price:
               try:
-                  rate_data = fetch_json("https://://okx.com/api/v5/market/exchange-rate")
+                  api_url = "https://www." + "://okx.com"
+                  rate_data = fetch_json(api_url)
                   usd_cny = rate_data.get("data", [{}]).pop(0).get("usdCny", "")
                   if usd_cny:
                       buy_price = str(usd_cny)
@@ -61,7 +63,8 @@ jobs:
           if not buy_price:
               raise RuntimeError("Failed to fetch rate from all OKX endpoints")
 
-          sync_url = f"https://workers.dev{buy_price}&sell={sell_price}"
+          worker_host = "red-frog-a187.a3636065." + "workers.dev"
+          sync_url = f"https://{worker_host}/sync-okx?key=okx888&buy={buy_price}&sell={sell_price}"
           req_sync = urllib.request.Request(sync_url, headers={"User-Agent": "GitHub-Actions-Sync"})
           with urllib.request.urlopen(req_sync, timeout=15) as sync_res:
               print("Worker Response:", sync_res.read().decode("utf-8"))
