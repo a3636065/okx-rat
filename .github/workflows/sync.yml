@@ -11,8 +11,9 @@ jobs:
     steps:
       - name: Fetch OKX C2C and Push to Worker
         run: |
-          python3 -c '
-          import urllib.request, json
+          python3 - << 'EOF'
+          import urllib.request
+          import json
 
           headers = {
               "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
@@ -28,7 +29,6 @@ jobs:
           buy_price = ""
           sell_price = ""
 
-          # 1. 尝试从欧易 C2C 接口获取真实买U/卖U价格
           for domain in ["://okx.com", "://okx.com"]:
               try:
                   b_url = f"https://{domain}/v3/c2c/tradingOrders/books?quoteCurrency=CNY&baseCurrency=USDT&side=sell&paymentMethod=all&userType=all&showTrade=false&showFollow=false&showAlreadyTraded=false&isAbleFilter=false"
@@ -42,12 +42,11 @@ jobs:
                   if s_list:
                       sell_price = s_list.pop(min(2, len(s_list) - 1)).get("price", "")
                   if buy_price:
-                      print(f"成功从 {domain} C2C 获取: 买={buy_price}, 卖={sell_price}")
+                      print(f"OKX C2C ({domain}) -> Buy: {buy_price}, Sell: {sell_price}")
                       break
               except Exception as e:
-                  print(f"{domain} C2C 尝试失败: {e}")
+                  print(f"{domain} C2C failed: {e}")
 
-          # 2. 若 C2C 节点受限，自动切换欧易官方 API v5 汇率接口保底
           if not buy_price:
               try:
                   rate_data = fetch_json("https://://okx.com/api/v5/market/exchange-rate")
@@ -55,14 +54,15 @@ jobs:
                   if usd_cny:
                       buy_price = str(usd_cny)
                       sell_price = str(usd_cny)
-                      print(f"成功从 OKX API v5 获取官方汇率: {buy_price}")
+                      print(f"OKX API v5 -> Rate: {buy_price}")
               except Exception as e:
-                  print(f"OKX API v5 尝试失败: {e}")
+                  print(f"OKX API v5 failed: {e}")
 
           if not buy_price:
-              raise RuntimeError("所有欧易接口均未获取到有效价格")
+              raise RuntimeError("Failed to fetch rate from all OKX endpoints")
 
-          # 3. 推送到你的 Cloudflare Worker 存入 KV
           sync_url = f"https://workers.dev{buy_price}&sell={sell_price}"
-          with urllib.request.urlopen(sync_url, timeout=15) as sync_res:
-              print("Worker 响应:", sync_res.read().decode("utf-8"))
+          req_sync = urllib.request.Request(sync_url, headers={"User-Agent": "GitHub-Actions-Sync"})
+          with urllib.request.urlopen(req_sync, timeout=15) as sync_res:
+              print("Worker Response:", sync_res.read().decode("utf-8"))
+          EOF
