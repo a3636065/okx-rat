@@ -1,0 +1,24 @@
+name: Sync OKX C2C Rate
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch OKX C2C and Push to Worker
+        run: |
+          BUY_JSON=$(curl -s -H "User-Agent: Mozilla/5.0" "https://okx.com")
+          SELL_JSON=$(curl -s -H "User-Agent: Mozilla/5.0" "https://okx.com")
+
+          BUY_PRICE=$(echo "$BUY_JSON" | jq -r '.data.sell | .[2].price // .[0].price // empty')
+          SELL_PRICE=$(echo "$SELL_JSON" | jq -r '.data.buy | .[2].price // .[0].price // empty')
+
+          echo "Buy: $BUY_PRICE, Sell: $SELL_PRICE"
+
+          if [ -n "$BUY_PRICE" ]; then
+            curl -s "https://workers.dev{BUY_PRICE}&sell=${SELL_PRICE}"
+          fi
