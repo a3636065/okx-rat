@@ -11,14 +11,58 @@ jobs:
     steps:
       - name: Fetch OKX C2C and Push to Worker
         run: |
-          BUY_JSON=$(curl -s -H "User-Agent: Mozilla/5.0" "https://okx.com")
-          SELL_JSON=$(curl -s -H "User-Agent: Mozilla/5.0" "https://okx.com")
+          python3 -c '
+          import urllib.request, json
 
-          BUY_PRICE=$(echo "$BUY_JSON" | jq -r '.data.sell | .[2].price // .[0].price // empty')
-          SELL_PRICE=$(echo "$SELL_JSON" | jq -r '.data.buy | .[2].price // .[0].price // empty')
+          headers = {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
+              "Accept": "application/json",
+              "Referer": "https://okx.com"
+          }
 
-          echo "Buy: $BUY_PRICE, Sell: $SELL_PRICE"
+          def fetch_json(url):
+              req = urllib.request.Request(url, headers=headers)
+              with urllib.request.urlopen(req, timeout=15) as res:
+                  return json.loads(res.read().decode("utf-8"))
 
-          if [ -n "$BUY_PRICE" ]; then
-            curl -s "https://workers.dev{BUY_PRICE}&sell=${SELL_PRICE}"
-          fi
+          buy_price = ""
+          sell_price = ""
+
+          # 1. 尝试从欧易 C2C 接口获取真实买U/卖U价格
+          for domain in ["://okx.com", "://okx.com"]:
+              try:
+                  b_url = f"https://{domain}/v3/c2c/tradingOrders/books?quoteCurrency=CNY&baseCurrency=USDT&side=sell&paymentMethod=all&userType=all&showTrade=false&showFollow=false&showAlreadyTraded=false&isAbleFilter=false"
+                  s_url = f"https://{domain}/v3/c2c/tradingOrders/books?quoteCurrency=CNY&baseCurrency=USDT&side=buy&paymentMethod=all&userType=all&showTrade=false&showFollow=false&showAlreadyTraded=false&isAbleFilter=false"
+                  b_data = fetch_json(b_url)
+                  s_data = fetch_json(s_url)
+                  b_list = b_data.get("data", {}).get("sell", [])
+                  s_list = s_data.get("data", {}).get("buy", [])
+                  if b_list:
+                      buy_price = b_list.pop(min(2, len(b_list) - 1)).get("price", "")
+                  if s_list:
+                      sell_price = s_list.pop(min(2, len(s_list) - 1)).get("price", "")
+                  if buy_price:
+                      print(f"成功从 {domain} C2C 获取: 买={buy_price}, 卖={sell_price}")
+                      break
+              except Exception as e:
+                  print(f"{domain} C2C 尝试失败: {e}")
+
+          # 2. 若 C2C 节点受限，自动切换欧易官方 API v5 汇率接口保底
+          if not buy_price:
+              try:
+                  rate_data = fetch_json("https://://okx.com/api/v5/market/exchange-rate")
+                  usd_cny = rate_data.get("data", [{}]).pop(0).get("usdCny", "")
+                  if usd_cny:
+                      buy_price = str(usd_cny)
+                      sell_price = str(usd_cny)
+                      print(f"成功从 OKX API v5 获取官方汇率: {buy_price}")
+              except Exception as e:
+                  print(f"OKX API v5 尝试失败: {e}")
+
+          if not buy_price:
+              raise RuntimeError("所有欧易接口均未获取到有效价格")
+
+          # 3. 推送到你的 Cloudflare Worker 存入 KV
+          sync_url = f"https://workers.dev{buy_price}&sell={sell_price}"
+          with urllib.request.urlopen(sync_url, timeout=15) as sync_res:
+              print("Worker 响应:", sync_res.read().decode("utf-8"))
